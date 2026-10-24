@@ -13,13 +13,16 @@ An online social deduction game set in a Lagos compound and a Lagos danfo. Find 
 | `api/verify-payment.js` | Confirms Paystack payments on the server, then unlocks the item or marks the ad as paid. |
 | `api/ice.js` | Gives the browser the servers used to connect voice chat (STUN, plus TURN if you set one up). |
 | `supabase/migrations/0001_naija_sus.sql` | Database tables, rules, functions and the storage bucket. |
-| `supabase/migrations/0002_accounts_servers.sql` | Player accounts, usernames, stats, purchases on accounts, and the 128 official servers. |
+| `supabase/migrations/0002_accounts_servers.sql` | Player accounts, usernames, stats, purchases on accounts, and the first 128 official servers. |
+| `supabase/migrations/0003_more_servers_stats.sql` | 72 more servers (mostly 12-player) and the visits / games counters. |
 
 ## How online play works
 
-- Supabase holds the server list (`rooms` table). 128 official servers are seeded, 64 per mode, spread across Lagos, Abuja, Port Harcourt, Ibadan and the rest of Nigeria. Players can search by area or route and filter by size, thieves and area. Players can also create public or private rooms with a 6-letter code.
+- Supabase holds the server list (`rooms` table). 200 official servers are seeded, 100 per mode (61 of them for 12 players), spread across Lagos, Abuja, Port Harcourt, Ibadan and the rest of Nigeria. Players can search by area or route and filter by size, thieves and area. Players can also create public or private rooms with a 6-letter code.
 - Each room is a Supabase Realtime channel. The first player in the room is the host and runs the game. Everyone else sends their moves to the host. If the host leaves, the next player takes over.
-- Empty seats are filled by computer players so a round can always start.
+- Online rooms are real players only. A round starts with 2 or more people; public rooms count down 30 seconds (5 when full), private rooms start when the host taps Start. The game waits up to 15 seconds for anyone still coming back from the last round.
+- Practice mode is separate and fills the room with computer players. It also works offline.
+- The main menu shows how many people are online right now (live), plus all-time visits and games played.
 - Voice chat is WebRTC, peer to peer. You only hear players close to you, and they fade out smoothly as they walk away. Mics use echo cancelling, noise removal and auto level. Audio is Opus at 28 kbps with packet-loss repair. A green sound icon shows who is talking.
 - Players who are out (phone stolen or voted out) lose their mic and meeting chat for the rest of the round. Nobody can hear them.
 - If the server can't be reached, the game falls back to offline practice with computer players.
@@ -63,12 +66,13 @@ Usernames are 3 to 15 letters, numbers or `_`, and no two players can have the s
 ## Voice chat relay (recommended)
 
 Without a relay, two players on some mobile networks can't hear each other. Add one of these in Vercel and redeploy:
+- Metered Open Relay (free, 20 GB a month): sign up at metered.ca/tools/openrelay, then add `METERED_APP` (your app name, the part before `.metered.live`) and `METERED_API_KEY`.
 - Cloudflare Realtime TURN (free up to 1,000 GB a month): `CLOUDFLARE_TURN_KEY_ID` and `CLOUDFLARE_TURN_API_TOKEN`.
 - Any other TURN provider: `TURN_URLS` (comma separated), `TURN_USERNAME`, `TURN_CREDENTIAL`.
 
 ## Running the shop
 
-Items go from ₦500 to ₦50,000. Everything is cosmetic or a hosting perk, so nobody can pay to win.
+Items go from ₦500 to ₦20,000. Everything is cosmetic or a hosting perk, so nobody can pay to win.
 
 | Item | Price |
 | --- | --- |
@@ -80,7 +84,6 @@ Items go from ₦500 to ₦50,000. Everything is cosmetic or a hosting perk, so 
 | Detty December Pass | ₦5,000 |
 | Private Room Pro (30 days) | ₦10,000 |
 | Owambe Mega Bundle | ₦20,000 |
-| Odogwu VIP (lifetime) | ₦50,000 |
 
 Purchases made while logged in are saved to the account and work on any device. Guest purchases are tied to the device. To move one by hand, set `user_id` on the row in the `purchases` table.
 

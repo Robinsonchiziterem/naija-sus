@@ -18,16 +18,13 @@ export const ITEMS = [
   { id: "pro_rooms", name: "Private Room Pro (30 days)", price: 10000, tag: "Hosting",
     desc: "Host private rooms of up to 15 players and pick 3-minute meetings. Great for church groups, offices and hostels." },
   { id: "mega_bundle", name: "Owambe Mega Bundle", price: 20000, tag: "Best value",
-    desc: "Every emote, name tag, exit bag, outfit, pet and the Detty December Pass. Save over 30%." },
-  { id: "vip", name: "Odogwu VIP (lifetime)", price: 50000, tag: "VIP",
-    desc: "Everything in the game forever, Private Room Pro forever, the Gold Crown, the Gold Agbada and a VIP badge in every lobby." },
+    desc: "Every emote, name tag, exit bag, outfit, pet and the Detty December Pass, plus the Gold Crown and Gold Agbada you can only get here. Save over 30%." },
 ];
 
 // What each purchase unlocks.
 export const INCLUDES = {
   detty_pass: ["detty_pass", "emotes_basic", "nametag_glow"],
   mega_bundle: ["emotes_basic", "nametag_glow", "luggage_pack", "owambe_pack", "pet_pack", "detty_pass"],
-  vip: ["emotes_basic", "nametag_glow", "luggage_pack", "owambe_pack", "pet_pack", "detty_pass", "pro_rooms", "vip"],
 };
 
 // Ad packages that brands, businesses and musicians can buy. Each runs for 7 days.

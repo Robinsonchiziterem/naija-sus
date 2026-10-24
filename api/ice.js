@@ -10,9 +10,14 @@ const STUN = [
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "private, no-store");
   const servers = [...STUN];
-  const { CLOUDFLARE_TURN_KEY_ID: keyId, CLOUDFLARE_TURN_API_TOKEN: token, TURN_URLS, TURN_USERNAME, TURN_CREDENTIAL } = process.env;
+  const { CLOUDFLARE_TURN_KEY_ID: keyId, CLOUDFLARE_TURN_API_TOKEN: token, TURN_URLS, TURN_USERNAME, TURN_CREDENTIAL, METERED_APP, METERED_API_KEY } = process.env;
   try {
-    if (keyId && token) {
+    if (METERED_APP && METERED_API_KEY) {
+      const app = METERED_APP.replace(/^https?:\/\//, "").replace(/\.metered\.live.*$/, "");
+      const r = await fetch(`https://${app}.metered.live/api/v1/turn/credentials?apiKey=${encodeURIComponent(METERED_API_KEY)}`);
+      const list = await r.json();
+      if (Array.isArray(list)) for (const s of list) if (String(s.urls || "").startsWith("turn")) servers.push(s);
+    } else if (keyId && token) {
       const r = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${keyId}/credentials/generate`, {
         method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ ttl: 6 * 3600 }),
       });
