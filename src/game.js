@@ -1,4 +1,5 @@
 import { ITEMS, INCLUDES } from "./catalog.js";
+import { createJazz } from "./jazz.js";
 
 (() => {
 "use strict";
@@ -510,6 +511,7 @@ DATA.deviceId = typeof DATA.deviceId === "string" && DATA.deviceId.length > 10 ?
 DATA.owned = Array.isArray(DATA.owned) ? DATA.owned : [];
 DATA.email = typeof DATA.email === "string" ? DATA.email : "";
 DATA.settings.radio = DATA.settings.radio !== false;
+DATA.settings.music = DATA.settings.music !== false;
 M = MAPS[DATA.mode];
 function save() { try { localStorage.setItem(KEY, JSON.stringify(DATA)); } catch (e) { /* storage unavailable */ } }
 save();
@@ -1423,7 +1425,7 @@ function menuHTML() {
       <button class="tile" data-go="friends">${ICONS.friends}Friends</button>
     </nav>
     ${sponsorHTML("menu")}
-    <p class="foot" style="margin:0"><button class="linkish" data-act="how">How to play</button> · <button class="linkish" data-go="settings">Settings</button>${NET.ready ? ` · <button class="linkish" data-go="account">${isSignedIn() ? "Account" : "Log in"}</button>` : ""} · <a class="linkish" href="/advertise.html">Advertise</a></p>`;
+    <p class="foot" style="margin:0"><button class="linkish" data-act="music" aria-pressed="${S().music}">${S().music ? "Music on" : "Music off"}</button> · <button class="linkish" data-act="how">How to play</button> · <button class="linkish" data-go="settings">Settings</button>${NET.ready ? ` · <button class="linkish" data-go="account">${isSignedIn() ? "Account" : "Log in"}</button>` : ""} · <a class="linkish" href="/advertise.html">Advertise</a></p>`;
 }
 function modesHTML() {
   return `<section class="sheet">
@@ -1682,6 +1684,7 @@ function settingsHTML() {
     <div class="setting"><div class="setting-top"><strong>Sound effects</strong>${swt("sound", "Sound effects")}</div></div>
     <div class="setting"><div class="setting-top"><strong>Vibration</strong>${swt("vibrate", "Vibration")}</div><span class="tiny muted">On phones that support it.</span></div>
     <div class="setting"><div class="setting-top"><strong>Names on the map</strong>${swt("names", "Names on the map")}</div></div>
+    <div class="setting"><div class="setting-top"><strong>Menu music</strong>${swt("music", "Menu music")}</div><span class="tiny muted">Smooth jazz on the menus. It stops when you join a room.</span></div>
     <div class="setting"><div class="setting-top"><strong>Danfo radio music</strong>${swt("radio", "Danfo radio music")}</div><span class="tiny muted">Songs from Nigerian artists and brands play on the danfo radio.</span></div>
     <div class="setting"><div class="setting-top"><strong>Proximity voice chat</strong>${swt("voice", "Proximity voice chat")}</div><span class="tiny muted">In online games you hear real players only when they stand right next to you, and only in the same room. Computer players talk out loud with your device's voice.</span></div>
     <div class="setting"><strong>Difficulty</strong>${seg("difficulty", [["easy", "Easy"], ["normal", "Normal"], ["hard", "Hard"]])}<span class="tiny muted">How careful the computer thieves are, and how sharp everyone votes.</span></div>
@@ -2722,6 +2725,7 @@ document.addEventListener("click", (e) => {
   if (d.pick) { const m = G && G.meeting; if (m && m.phase === "vote" && me.alive && m.cast[me.id] === undefined) { m.pick = Number(d.pick); sfx("tap"); renderVotePanel(); } return; }
   switch (d.act) {
     case "how": howModal(); break;
+    case "music": DATA.settings.music = !DATA.settings.music; save(); musicUnlocked = true; menuMusicTick(); renderMenu(); break;
     case "forgot": doForgot(); break;
     case "signout": doSignout(); break;
     case "pwlink": NET.sb.auth.resetPasswordForEmail(ACCT.user.email, { redirectTo: location.origin + "/" }).then(({ error }) => acctSay(error ? niceAuthError(error) : `We sent a link to ${ACCT.user.email}. Open it on this device to set a new password.`, !!error)); break;
@@ -2768,7 +2772,7 @@ document.addEventListener("click", (e) => {
     case "reset":
       if (!resetArmed) { resetArmed = true; renderMenu(); break; }
       resetArmed = false; try { [KEY, "who-be-thief-v1", "who-be-ole-v2"].forEach((k) => localStorage.removeItem(k)); } catch (err) { /* ignore */ }
-      DATA = { name: "", look: { ...DEFAULT_LOOK }, settings: { sound: true, vibrate: true, difficulty: "normal", chores: "normal", talk: "normal", names: true, voice: true }, friends: [], rooms: [], mode: "compound" };
+      DATA = { name: "", look: { ...DEFAULT_LOOK }, settings: { sound: true, vibrate: true, difficulty: "normal", chores: "normal", talk: "normal", names: true, voice: true, radio: true, music: true }, friends: [], rooms: [], mode: "compound" };
       M = MAPS.compound; save(); D = null; go("menu"); break;
     case "enter": case "resume": closeModal(); G.paused = false; break;
     case "use": case "bell": doUse(); break;
@@ -2830,7 +2834,7 @@ document.addEventListener("keydown", (e) => {
   if (G && G.mini) { G.mini = null; miniToken++; closeModal(); }
   else if (!G) { closeModal(); syncMyLook(); }
 });
-window.__sus = { get G() { return G; }, get P() { return P; }, get ROOM() { return ROOM; }, get LB() { return LB; }, get M() { return M; } };
+window.__sus = { get G() { return G; }, get P() { return P; }, get ROOM() { return ROOM; }, get LB() { return LB; }, get M() { return M; }, get music() { return JAZZ.playing; } };
 
 renderMenu();
 (async () => {
@@ -2844,4 +2848,21 @@ renderMenu();
   if (["menu", "servers", "shop", "account"].includes(screen)) renderMenu();
 })();
 document.addEventListener("pointerdown", unlockVoice, { passive: true });
+
+// ---------- Menu music ----------
+// Browsers only allow sound after the first tap or key press, so the jazz starts then.
+const JAZZ = createJazz();
+let musicUnlocked = false;
+function menuMusicTick() {
+  const want = S().music && musicUnlocked && !G && screen !== "room" && !document.hidden;
+  try {
+    if (want && !JAZZ.playing) JAZZ.start(audioCtx(), 0.32);
+    else if (!want && JAZZ.playing) JAZZ.stop(G || screen === "room" ? 0.6 : 0.3);
+  } catch (e) { /* no audio on this device */ }
+}
+const unlockMusic = () => { if (musicUnlocked) return; musicUnlocked = true; menuMusicTick(); };
+document.addEventListener("pointerdown", unlockMusic, { passive: true });
+document.addEventListener("keydown", unlockMusic);
+document.addEventListener("visibilitychange", menuMusicTick);
+setInterval(menuMusicTick, 300);
 })();
