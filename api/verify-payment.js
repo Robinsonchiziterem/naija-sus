@@ -50,7 +50,8 @@ export default async function handler(req, res) {
       await rpc("mark_ad_paid", { p_secret: process.env.PAYMENTS_SHARED_SECRET, p_ad: meta.ad_id, p_amount: paid, p_ref: reference });
     } else {
       if (!meta.device_id) return res.status(400).json({ ok: false, error: "Missing player id." });
-      await rpc("record_purchase", { p_secret: process.env.PAYMENTS_SHARED_SECRET, p_device: String(meta.device_id).slice(0, 64), p_item: meta.item_id, p_amount: paid, p_ref: reference });
+      const user = /^[0-9a-f-]{36}$/i.test(String(meta.user_id || "")) ? meta.user_id : null;
+      await rpc("record_purchase", { p_secret: process.env.PAYMENTS_SHARED_SECRET, p_device: String(meta.device_id).slice(0, 64), p_item: meta.item_id, p_amount: paid, p_ref: reference, p_user: user });
     }
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Payment confirmed but saving failed. Contact support with your reference." });

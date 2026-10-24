@@ -632,7 +632,9 @@ const ICONS = {
   bag: '<svg class="ico" viewBox="0 0 24 24"><path d="M5 8h14l-1 12H6L5 8Z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/></svg>',
 };
 let SERVERS = [], serversMode = null, serverTimer = null;
-const filters = { players: "any", thieves: "any" };
+const filters = { players: "any", thieves: "any", region: "any" };
+let srvQuery = "", srvPage = 1;
+const PAGE = 20;
 function makeServers() {
   serversMode = DATA.mode;
   SERVERS = shuffle(SERVER_NAMES[DATA.mode]).slice(0, 14).map((name, i) => {
@@ -640,6 +642,7 @@ function makeServers() {
     return { id: "s" + i + "-" + Date.now(), name, host: pick(BOT_NAMES), max, thieves, players: Math.random() < 0.18 ? max : randi(1, max - 1), ping: randi(18, 140) };
   });
 }
+const filterCount = () => (NET.ready && !practice ? onlineFiltered().length : filteredServers().length);
 function filteredServers() {
   return SERVERS.filter((s) => (filters.players === "any" || s.max === Number(filters.players)) && (filters.thieves === "any" || s.thieves === Number(filters.thieves)))
     .sort((a, b) => (a.players >= a.max) - (b.players >= b.max) || b.players / b.max - a.players / a.max);
@@ -676,9 +679,122 @@ async function initNet() {
   if (!NET.cfg.supabaseUrl || !NET.cfg.supabaseAnonKey) return;
   try {
     const { createClient } = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm");
-    NET.sb = createClient(NET.cfg.supabaseUrl, NET.cfg.supabaseAnonKey, { auth: { persistSession: false, autoRefreshToken: false }, realtime: { params: { eventsPerSecond: 40 } } });
+    NET.sb = createClient(NET.cfg.supabaseUrl, NET.cfg.supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storageKey: "naija-sus-auth" }, realtime: { params: { eventsPerSecond: 40 } } });
     NET.ready = true;
-  } catch (e) { NET.ready = false; }
+  } catch (e) { NET.ready = false; return; }
+  loadIce();
+  try { await initAuth(); } catch (e) { /* play as a guest */ }
+}
+
+// =====================================================================
+// Accounts: sign up with email, log in, username, saved look and stats
+// =====================================================================
+const ACCT = { user: null, profile: null, view: "signup", msg: "", err: "", recovery: false, check: { name: "", ok: null } };
+const isSignedIn = () => !!ACCT.user;
+const USER_RE = /^[A-Za-z0-9_]{3,15}$/;
+let lastUid = null, lookTimer = null, checkTimer = null;
+async function initAuth() {
+  NET.sb.auth.onAuthStateChange((ev, session) => {
+    if (ev === "PASSWORD_RECOVERY") { ACCT.recovery = true; ACCT.err = ""; ACCT.msg = "Choose a new password for your account."; screen = "account"; }
+    setTimeout(() => applySession(session, ev), 0);
+  });
+  const { data } = await NET.sb.auth.getSession();
+  await applySession(data && data.session, "INITIAL");
+}
+async function applySession(session, ev) {
+  const user = session ? session.user : null, uid = user ? user.id : null;
+  ACCT.user = user;
+  if (uid === lastUid && ev !== "INITIAL" && ev !== "USER_UPDATED" && ev !== "PASSWORD_RECOVERY") return;
+  lastUid = uid;
+  if (!user) { ACCT.profile = null; refreshAfterAuth(); return; }
+  await loadProfile();
+  try { await NET.sb.rpc("claim_purchases", { p_device: DATA.deviceId }); } catch (e) { /* try again next time */ }
+  await loadPurchases().catch(() => {});
+  tidyLook();
+  if (ev === "SIGNED_IN" && screen === "account" && !ACCT.recovery) { ACCT.err = ""; ACCT.msg = ACCT.profile && ACCT.profile.username ? `Welcome, ${ACCT.profile.username}! Your stuff is saved to your account.` : "You're in. Pick a username to finish."; }
+  refreshAfterAuth();
+}
+async function loadProfile() {
+  if (!isSignedIn()) return;
+  const { data } = await NET.sb.rpc("my_profile");
+  const row = Array.isArray(data) ? data[0] : data;
+  ACCT.profile = row || { username: null, look: {}, games_played: 0, wins: 0, thief_wins: 0 };
+  if (row && row.look && Object.keys(row.look).length) { DATA.look = Object.assign({ ...DEFAULT_LOOK, pet: "none", tag: "none", bag: "gmg" }, row.look); }
+  else saveLookSoon(0);
+  if (ACCT.user.email) DATA.email = ACCT.user.email;
+  save();
+}
+function refreshAfterAuth() { if (!G && screen !== "room") renderMenu(); else { syncMyLook(); } }
+function saveLookSoon(ms = 1500) { if (!isSignedIn()) return; clearTimeout(lookTimer); lookTimer = setTimeout(() => NET.sb.rpc("save_look", { p_look: DATA.look }).then(() => {}, () => {}), ms); }
+function acctSay(msg, err) { ACCT.msg = err ? "" : msg; ACCT.err = err ? msg : ""; renderMenu(); }
+function niceAuthError(e) {
+  const m = String((e && e.message) || e || "").toLowerCase();
+  if (m.includes("invalid login")) return "Wrong email or password.";
+  if (m.includes("not confirmed")) return "Confirm your email first. Check your inbox (and spam) for the link.";
+  if (m.includes("already registered") || m.includes("already been registered")) return "That email already has an account. Log in instead.";
+  if (m.includes("password") && m.includes("characters")) return "Your password needs at least 8 characters.";
+  if (m.includes("rate") || m.includes("too many") || m.includes("security purposes")) return "Too many tries. Wait a minute and try again.";
+  if (m.includes("email") && m.includes("invalid")) return "That email doesn't look right.";
+  if (m.includes("fetch") || m.includes("network")) return "Couldn't reach the server. Check your internet.";
+  return "Something went wrong. Please try again.";
+}
+function checkUsername(id) {
+  const el = $("#" + id), out = $("#" + id + "Msg"); if (!el || !out) return;
+  const v = el.value.trim(); clearTimeout(checkTimer);
+  if (!v) { out.textContent = "3 to 15 letters, numbers or _"; out.style.color = ""; return; }
+  if (!USER_RE.test(v)) { out.textContent = "Use 3 to 15 letters, numbers or _ (no spaces)."; out.style.color = "#ffc4c4"; return; }
+  if (ACCT.profile && ACCT.profile.username && ACCT.profile.username.toLowerCase() === v.toLowerCase()) { out.textContent = "That's your username now."; out.style.color = ""; return; }
+  out.textContent = "Checking..."; out.style.color = "";
+  checkTimer = setTimeout(async () => {
+    const { data } = await NET.sb.rpc("username_available", { p_username: v });
+    if ($("#" + id) && $("#" + id).value.trim() === v) { out.textContent = data ? `${v} is free.` : `${v} is taken or not allowed. Try another.`; out.style.color = data ? "var(--green)" : "#ffc4c4"; }
+  }, 350);
+}
+async function doSignup() {
+  const username = $("#suName").value.trim(), email = $("#suEmail").value.trim(), password = $("#suPass").value;
+  if (!USER_RE.test(username)) return acctSay("Pick a username: 3 to 15 letters, numbers or _.", true);
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return acctSay("Add a working email address.", true);
+  if (password.length < 8) return acctSay("Your password needs at least 8 characters.", true);
+  const { data: free } = await NET.sb.rpc("username_available", { p_username: username });
+  if (!free) return acctSay(`${username} is taken. Try another username.`, true);
+  const { data, error } = await NET.sb.auth.signUp({ email, password, options: { data: { username }, emailRedirectTo: location.origin + "/" } });
+  if (error) return acctSay(niceAuthError(error), true);
+  if (data.session) { DATA.name = username; save(); return; }
+  if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) { ACCT.view = "login"; return acctSay("That email already has an account. Log in instead.", true); }
+  ACCT.view = "login"; acctSay(`Almost done! We sent a link to ${email}. Tap it to confirm, then log in here.`);
+}
+async function doLogin() {
+  const email = $("#liEmail").value.trim(), password = $("#liPass").value;
+  if (!email || !password) return acctSay("Type your email and password.", true);
+  const { error } = await NET.sb.auth.signInWithPassword({ email, password });
+  if (error) return acctSay(niceAuthError(error), true);
+  ACCT.msg = "Logging you in..."; ACCT.err = "";
+}
+async function doForgot() {
+  const el = $("#liEmail"), email = el ? el.value.trim() : "";
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return acctSay("Type your email above first, then tap Forgot password.", true);
+  const { error } = await NET.sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + "/" });
+  if (error) return acctSay(niceAuthError(error), true);
+  acctSay(`If ${email} has an account, a reset link is on its way. Check your inbox and spam.`);
+}
+async function doSetUsername() {
+  const v = $("#unName").value.trim();
+  if (!USER_RE.test(v)) return acctSay("Use 3 to 15 letters, numbers or _ (no spaces).", true);
+  const { data, error } = await NET.sb.rpc("set_username", { p_username: v });
+  if (error || data !== "ok") return acctSay(data === "taken" ? `${v} is taken. Try another.` : data === "invalid" ? "That username isn't allowed. Try another." : "Couldn't save your username. Try again.", true);
+  await loadProfile(); DATA.name = v; save(); syncMyLook(); acctSay(`You're now ${v}.`);
+}
+async function doNewPassword() {
+  const pw = $("#npPass").value;
+  if (pw.length < 8) return acctSay("Your password needs at least 8 characters.", true);
+  const { error } = await NET.sb.auth.updateUser({ password: pw });
+  if (error) return acctSay(niceAuthError(error), true);
+  ACCT.recovery = false; acctSay("Password changed. You're logged in.");
+}
+async function doSignout() {
+  await NET.sb.auth.signOut().catch(() => {});
+  ACCT.user = null; ACCT.profile = null; lastUid = null; ACCT.view = "login"; DATA.purchases = []; save();
+  await loadPurchases().catch(() => {}); tidyLook(); acctSay("You've logged out. Your items stay on your account.");
 }
 function send(event, payload) { if (NET.ch) NET.ch.send({ type: "broadcast", event, payload }).catch(() => {}); }
 // Things that happen in the game. The host decides them; everybody (host included) reacts.
@@ -1033,7 +1149,7 @@ function shopHTML() {
     <div class="shop-list">${ITEMS.map((it) => { const have = owns(it.id); return `<article class="shop-item ${shopFocus === it.id ? "focus" : ""}" id="item-${it.id}">
       <div><span class="chip ${it.id === "vip" ? "gold" : it.id === "mega_bundle" ? "green" : ""}">${esc(it.tag)}</span><strong>${esc(it.name)}</strong><p class="small muted" style="margin:0">${esc(it.desc)}</p></div>
       <button class="btn ${have ? "btn-ghost" : ""}" data-buy="${it.id}" ${have || !payReady ? "disabled" : ""}>${have ? "Owned" : naira(it.price)}</button></article>`; }).join("")}</div>
-    <button class="linkish" data-act="restore">Bought something on this phone before? Refresh my items</button>
+    ${isSignedIn() ? `<p class="tiny muted" style="margin:0">Signed in as ${esc(displayName())}. Everything you buy is saved to your account.</p><button class="linkish" data-act="restore">Refresh my items</button>` : `<p class="tiny muted" style="margin:0">${NET.ready ? `<button class="linkish" data-go="account" style="padding:0">Sign up or log in</button> so your items follow you to any phone.` : ""}</p><button class="linkish" data-act="restore">Bought something on this phone before? Refresh my items</button>`}
     <a class="sponsor empty" href="/advertise.html">Own a brand, business or song? Advertise inside the game from ₦10,000 a week</a>
   </section>`;
 }
@@ -1048,7 +1164,7 @@ async function buy(id) {
   const ref = `NS-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const handler = window.PaystackPop.setup({
     key: NET.cfg.paystackPublicKey, email: DATA.email, amount: it.price * 100, currency: "NGN", ref,
-    metadata: { kind: "item", item_id: it.id, device_id: DATA.deviceId, custom_fields: [{ display_name: "Item", variable_name: "item", value: it.name }] },
+    metadata: { kind: "item", item_id: it.id, device_id: DATA.deviceId, user_id: isSignedIn() ? ACCT.user.id : null, custom_fields: [{ display_name: "Item", variable_name: "item", value: it.name }] },
     callback: (resp) => { verifyPayment(resp.reference, it, msg); },
     onClose: () => msg("Payment window closed. You were not charged.", true),
   });
@@ -1069,23 +1185,71 @@ async function verifyPayment(reference, it, msg) {
 // =====================================================================
 // Proximity voice between real players (WebRTC, signalled through the room)
 // =====================================================================
-const RTC = { peers: new Map(), stream: null };
-const ICE = [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:stun1.l.google.com:19302" }];
+const RTC = { peers: new Map(), stream: null, ac: null };
+// STUN by default. /api/ice adds a relay (TURN) server when one is set up, so
+// players on strict mobile networks can still hear each other.
+let ICE = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+async function loadIce() { try { const r = await fetch("/api/ice", { cache: "no-store" }); if (r.ok) { const j = await r.json(); if (Array.isArray(j.iceServers) && j.iceServers.length) ICE = j.iceServers; } } catch (e) { /* keep STUN */ } }
+// Mic settings tuned for talking: one channel, echo and background noise removed, level evened out.
+const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 48000, sampleSize: 16 } };
+// Ask Opus (the voice codec) to fill in lost packets, stay mono, and use enough bits for clear speech.
+// 28 kbps is clear for voice and light enough to send to 14 other players on mobile data. Silence costs almost nothing (DTX).
+function tuneSdp(sdp) {
+  const m = sdp.match(/a=rtpmap:(\d+) opus\/48000[^\r\n]*/i); if (!m) return sdp;
+  const pt = m[1], want = { useinbandfec: "1", usedtx: "1", stereo: "0", "sprop-stereo": "0", maxaveragebitrate: "28000", maxplaybackrate: "48000", minptime: "10" };
+  const re = new RegExp(`a=fmtp:${pt} ([^\\r\\n]*)`);
+  if (re.test(sdp)) return sdp.replace(re, (_, params) => {
+    const cur = Object.fromEntries(params.split(";").map((s) => s.trim()).filter(Boolean).map((s) => s.split("=")));
+    return `a=fmtp:${pt} ` + Object.entries({ ...cur, ...want }).map(([k, v]) => `${k}=${v}`).join(";");
+  });
+  return sdp.replace(m[0], `${m[0]}\r\na=fmtp:${pt} ` + Object.entries(want).map(([k, v]) => `${k}=${v}`).join(";"));
+}
+async function tuneSenders(pc) {
+  for (const s of pc.getSenders()) {
+    if (!s.track || s.track.kind !== "audio") continue;
+    try { const prm = s.getParameters(); if (!prm.encodings || !prm.encodings.length) prm.encodings = [{}]; prm.encodings.forEach((e) => { e.maxBitrate = 28000; e.priority = "high"; e.networkPriority = "high"; }); await s.setParameters(prm); } catch (e) { /* browser keeps its defaults */ }
+  }
+}
+function addMic(pc, stream) {
+  const senders = pc.getSenders();
+  for (const t of stream.getAudioTracks()) {
+    const free = senders.find((s) => !s.track);
+    if (senders.some((s) => s.track === t)) continue;
+    if (free) free.replaceTrack(t).catch(() => {}); else pc.addTrack(t, stream);
+  }
+  tuneSenders(pc);
+}
 function rtcPeer(id) {
   let p = RTC.peers.get(id);
   if (p) return p;
-  const pc = new RTCPeerConnection({ iceServers: ICE });
-  p = { pc, polite: NET.myId > id, makingOffer: false, ignore: false, audio: null };
+  const pc = new RTCPeerConnection({ iceServers: ICE, bundlePolicy: "max-bundle" });
+  p = { pc, polite: NET.myId > id, makingOffer: false, ignore: false, audio: null, vol: 0, an: null, buf: null, talkingAt: 0 };
   RTC.peers.set(id, p);
   pc.onicecandidate = ({ candidate }) => { if (candidate) send("rtc", { from: NET.myId, to: id, cand: candidate.toJSON() }); };
   pc.onnegotiationneeded = async () => {
-    try { p.makingOffer = true; await pc.setLocalDescription(); send("rtc", { from: NET.myId, to: id, desc: pc.localDescription.toJSON() }); }
-    catch (e) { /* retried on next change */ } finally { p.makingOffer = false; }
+    try {
+      p.makingOffer = true;
+      const offer = await pc.createOffer(); if (pc.signalingState !== "stable") return;
+      await pc.setLocalDescription({ type: "offer", sdp: tuneSdp(offer.sdp) });
+      send("rtc", { from: NET.myId, to: id, desc: pc.localDescription.toJSON() });
+    } catch (e) { /* retried on next change */ } finally { p.makingOffer = false; }
   };
-  pc.ontrack = ({ streams }) => { if (!p.audio) { p.audio = new Audio(); p.audio.autoplay = true; } p.audio.srcObject = streams[0]; p.audio.volume = 0; p.audio.play().catch(() => {}); };
-  if (RTC.stream) RTC.stream.getTracks().forEach((t) => pc.addTrack(t, RTC.stream));
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "connected") tuneSenders(pc);
+    if (pc.connectionState === "failed") { try { pc.restartIce(); } catch (e) { /* no voice with this player */ } }
+  };
+  pc.ontrack = ({ streams }) => {
+    if (!p.audio) { p.audio = new Audio(); p.audio.autoplay = true; p.audio.playsInline = true; }
+    p.audio.srcObject = streams[0]; p.audio.volume = 0; p.audio.play().catch(() => {});
+    // A level meter so we can show who is talking.
+    try { const ac = audioCtx(); const an = ac.createAnalyser(); an.fftSize = 256; ac.createMediaStreamSource(streams[0]).connect(an); p.an = an; p.buf = new Uint8Array(an.fftSize); } catch (e) { /* no meter */ }
+  };
+  if (RTC.stream && me && me.alive) addMic(pc, RTC.stream);
   return p;
 }
+function audioCtx() { if (!RTC.ac) RTC.ac = new (window.AudioContext || window.webkitAudioContext)(); if (RTC.ac.state === "suspended") RTC.ac.resume().catch(() => {}); return RTC.ac; }
+// Phones block sound until the player taps something. Every tap retries playback.
+function unlockVoice() { for (const p of RTC.peers.values()) if (p.audio && p.audio.paused) p.audio.play().catch(() => {}); if (RTC.ac && RTC.ac.state === "suspended") RTC.ac.resume().catch(() => {}); }
 async function rtcSignal({ from, desc, cand }) {
   if (!NET.online) return;
   const p = rtcPeer(from), pc = p.pc;
@@ -1094,30 +1258,48 @@ async function rtcSignal({ from, desc, cand }) {
       const collision = desc.type === "offer" && (p.makingOffer || pc.signalingState !== "stable");
       p.ignore = !p.polite && collision; if (p.ignore) return;
       await pc.setRemoteDescription(desc);
-      if (desc.type === "offer") { await pc.setLocalDescription(); send("rtc", { from: NET.myId, to: from, desc: pc.localDescription.toJSON() }); }
+      if (desc.type === "offer") {
+        const ans = await pc.createAnswer();
+        await pc.setLocalDescription({ type: "answer", sdp: tuneSdp(ans.sdp) });
+        send("rtc", { from: NET.myId, to: from, desc: pc.localDescription.toJSON() });
+      }
     } else if (cand) { try { await pc.addIceCandidate(cand); } catch (e) { if (!p.ignore) throw e; } }
   } catch (e) { /* a failed connection just means no voice with that player */ }
 }
 function rtcStart(stream) {
   RTC.stream = stream;
   if (!NET.online || !G) return;
-  for (const p of P) if (p.netId && !p.you && !p.isBot) { const peer = rtcPeer(p.netId); const senders = peer.pc.getSenders(); stream.getTracks().forEach((t) => { if (!senders.some((s) => s.track === t)) peer.pc.addTrack(t, stream); }); }
+  for (const p of P) if (p.netId && !p.you && !p.isBot) addMic(rtcPeer(p.netId).pc, stream);
 }
-function rtcClose() { for (const p of RTC.peers.values()) { try { p.pc.close(); if (p.audio) p.audio.srcObject = null; } catch (e) { /* ignore */ } } RTC.peers.clear(); RTC.stream = null; }
-// Volume falls off with distance. Walls block it. Ghosts can't talk to the living.
+// Stop sending our voice to everyone (the connections stay up so we can still listen).
+function rtcMute() { for (const p of RTC.peers.values()) for (const s of p.pc.getSenders()) if (s.track && s.track.kind === "audio") s.replaceTrack(null).catch(() => {}); }
+function rtcClose() { for (const p of RTC.peers.values()) { try { p.pc.close(); if (p.audio) { p.audio.pause(); p.audio.srcObject = null; } } catch (e) { /* ignore */ } } RTC.peers.clear(); RTC.stream = null; }
+// Full volume up close, fading smoothly to nothing at the edge of the circle.
+// Walls block it. Players who are out of the round can't be heard at all.
+function voiceLevel(d) { const near = VOICE_R * 0.35; if (d <= near) return 1; if (d >= VOICE_R) return 0; const x = 1 - (d - near) / (VOICE_R - near); return x * x * (3 - 2 * x); }
 function rtcVolumes() {
   if (!RTC.peers.size || !G || !me) return;
+  const now = performance.now();
   for (const [id, peer] of RTC.peers) {
     if (!peer.audio) continue;
     const sp = P.find((p) => p.netId === id);
     let v = 0;
-    if (sp && S().voice) {
-      if (!sp.alive && me.alive) v = 0;
-      else if (G.mode === "meeting") v = 1;
-      else if (areaOf(sp) === areaOf(me)) { const d = dist(me, sp); v = d < VOICE_R ? 1 - (d / VOICE_R) * 0.75 : 0; }
+    if (sp && sp.alive && S().voice) {
+      if (G.mode === "meeting") v = 1;
+      else if (areaOf(sp) === areaOf(me)) v = voiceLevel(dist(me, sp));
     }
-    peer.audio.volume = v;
+    peer.vol += (v - peer.vol) * 0.25; if (Math.abs(peer.vol - v) < 0.01) peer.vol = v;
+    peer.audio.volume = clamp(peer.vol, 0, 1);
+    if (peer.an && sp) {
+      peer.an.getByteTimeDomainData(peer.buf); let sum = 0; for (const b of peer.buf) { const x = (b - 128) / 128; sum += x * x; }
+      if (Math.sqrt(sum / peer.buf.length) > 0.04 && v > 0.05) sp.talkingAt = now;
+    }
   }
+}
+// Once you're out (phone stolen or voted out) your mic is off for the rest of the round.
+function silenceTheOut() {
+  if (!G || !me || me.alive) return;
+  if (G.mic || RTC.stream) { stopMic(); rtcMute(); lastActionsKey = ""; toast("You're out of the round, so your mic is off until the next one.", "bad"); }
 }
 
 function drawLobby(ctx, ts) {
@@ -1204,7 +1386,7 @@ const root = $("#root");
 let screen = "menu", custTab = "outfit", resetArmed = false, practice = false, menuMsg = "";
 const priv = { name: "", max: 8, thieves: 2, err: "", meet: 120 };
 function toastMenu(msg) { menuMsg = msg; if (screen === "servers" || screen === "menu") renderMenu(); }
-function displayName() { return DATA.name.trim() || "Player"; }
+function displayName() { return (ACCT.profile && ACCT.profile.username) || DATA.name.trim() || "Player"; }
 function setMode(id) { DATA.mode = id; M = MAPS[id]; save(); if (serversMode !== id) SERVERS = []; }
 function go(s) {
   if (s !== "room") { if (!(ROOM && ROOM.online)) clearRoomTimer(); stopLobby(); stopRadio(); }
@@ -1215,9 +1397,10 @@ function go(s) {
 }
 function renderMenu() {
   G = null; stopGameLoop(); startBg();
-  const views = { menu: menuHTML, modes: modesHTML, servers: serversHTML, private: privateHTML, customize: customizeHTML, friends: friendsHTML, settings: settingsHTML, shop: shopHTML };
+  const views = { menu: menuHTML, modes: modesHTML, servers: serversHTML, private: privateHTML, customize: customizeHTML, friends: friendsHTML, settings: settingsHTML, shop: shopHTML, account: accountHTML };
   root.innerHTML = `<div class="menu-shell"><div class="menu">${(views[screen] || menuHTML)()}</div></div>`;
   if (screen === "menu") $("#mePic").appendChild(portrait(DATA.look, 56, 70));
+  if (screen === "account" && $("#acctPic")) $("#acctPic").appendChild(portrait(myLook(), 84, 104));
   if (screen === "modes") fillModes();
   if (screen === "customize") fillCustomize();
   if (screen === "friends") fillFriends();
@@ -1230,8 +1413,8 @@ function menuHTML() {
   const invited = DATA.friends.filter((f) => f.invited).length;
   return `<header class="logo"><p class="eyebrow">Somebody among us is stealing phones</p><h1 class="display">Naija <span>Sus</span></h1><p>Find the thief before your phone don miss.</p></header>
     <div class="me-card"><div id="mePic" aria-hidden="true"></div>
-      <div><strong>${esc(displayName())}</strong><span class="small muted">${invited ? `${plural(invited, "friend", "friends")} invited` : "Ready to play"}</span></div>
-      <button class="btn btn-ghost btn-sm" data-go="customize">Edit</button></div>
+      <div><strong>${esc(displayName())}</strong><span class="small muted">${isSignedIn() ? `Signed in${ACCT.profile && ACCT.profile.games_played ? ` · ${plural(ACCT.profile.games_played, "game", "games")}` : ""}` : NET.ready ? "Guest · sign up to keep your stuff" : invited ? `${plural(invited, "friend", "friends")} invited` : "Ready to play"}</span></div>
+      <div class="me-btns"><button class="btn btn-ghost btn-sm" data-go="customize">Edit</button>${NET.ready ? `<button class="btn btn-sm ${isSignedIn() ? "btn-ghost" : ""}" data-go="account">${isSignedIn() ? "Account" : "Sign up"}</button>` : ""}</div></div>
     <button class="btn btn-block play-btn" data-go="servers"><b>Play</b><small>${NET.ready ? "Online" : "Offline practice"} · ${esc(M.title)}</small></button>
     <nav class="menu-grid" aria-label="Main menu">
       <button class="tile" data-go="modes">${ICONS.bus}Game modes</button>
@@ -1240,7 +1423,7 @@ function menuHTML() {
       <button class="tile" data-go="friends">${ICONS.friends}Friends</button>
     </nav>
     ${sponsorHTML("menu")}
-    <p class="foot" style="margin:0"><button class="linkish" data-act="how">How to play</button> · <button class="linkish" data-go="settings">Settings</button> · <a class="linkish" href="/advertise.html">Advertise</a></p>`;
+    <p class="foot" style="margin:0"><button class="linkish" data-act="how">How to play</button> · <button class="linkish" data-go="settings">Settings</button>${NET.ready ? ` · <button class="linkish" data-go="account">${isSignedIn() ? "Account" : "Log in"}</button>` : ""} · <a class="linkish" href="/advertise.html">Advertise</a></p>`;
 }
 function modesHTML() {
   return `<section class="sheet">
@@ -1265,16 +1448,22 @@ function fillModes() {
 function onlineRows() {
   if (roomsErr) return `<p class="small" style="margin:6px 0;color:#ffc4c4">${esc(roomsErr)}</p><button class="btn btn-ghost btn-block" data-act="practice">Play offline practice instead</button>`;
   if (!roomsLoaded) return `<p class="small muted" style="text-align:center;margin:10px 0">Finding servers...</p>`;
-  const list = ONLINE_ROOMS.filter((r) => (filters.players === "any" || r.max_players === Number(filters.players)) && (filters.thieves === "any" || r.thieves === Number(filters.thieves)));
-  if (!list.length) return `<p class="small muted" style="margin:6px 0;text-align:center">No servers match your filters.</p><button class="btn btn-ghost btn-block" data-act="clearfilters">Clear filters</button>`;
-  return list.map((r) => {
+  const list = onlineFiltered();
+  if (!list.length) return `<p class="small muted" style="margin:6px 0;text-align:center">No servers match${srvQuery ? ` "${esc(srvQuery)}"` : " your filters"}.</p><button class="btn btn-ghost btn-block" data-act="clearfilters">Clear search and filters</button>`;
+  const shown = list.slice(0, srvPage * PAGE), busy = ONLINE_ROOMS.filter((r) => r.player_count > 0).length;
+  return `<p class="tiny muted" style="margin:0">${plural(list.length, "server", "servers")}${list.length !== ONLINE_ROOMS.length ? ` of ${ONLINE_ROOMS.length}` : ""} · ${busy ? `${plural(busy, "has", "have")} players right now` : "be the first to start one"}</p>` + shown.map((r) => {
     const full = r.player_count >= r.max_players, playing = r.status === "playing";
     return `<article class="server"><div style="min-width:0"><strong>${esc(r.name)}</strong>
-      <div class="meta"><span>${r.player_count ? `Host: ${esc(r.host_name || "someone")}` : "Empty, be the first"}</span><span>${NET.ping} ms</span>${r.is_official ? "<span>Official</span>" : ""}</div>
+      <div class="meta"><span>${r.player_count ? `Host: ${esc(r.host_name || "someone")}` : "Empty, be the first"}</span><span>${esc(r.region || "Players")}</span><span>${NET.ping} ms</span>${r.is_official ? "" : "<span>Player room</span>"}</div>
       <div class="chips"><span class="chip red">${plural(r.thieves, "thief", "thieves")}</span><span class="chip">${r.max_players} players</span>${playing ? `<span class="chip gold">In a round</span>` : ""}</div></div>
       <div class="server-right"><span class="count ${full ? "full" : ""}" aria-label="${r.player_count} of ${r.max_players} real players inside">${ICONS.person}${r.player_count}/${r.max_players}</span>
       <button class="btn btn-sm ${full ? "" : "btn-green"}" data-join="${r.id}" ${full ? "disabled" : ""}>${full ? "Full" : playing ? "Wait" : "Join"}</button></div></article>`;
-  }).join("");
+  }).join("") + (list.length > shown.length ? `<button class="btn btn-ghost btn-block" data-act="more">Show more servers (${list.length - shown.length} left)</button>` : "");
+}
+function onlineFiltered() {
+  const q = srvQuery.trim().toLowerCase();
+  return ONLINE_ROOMS.filter((r) => (filters.players === "any" || r.max_players === Number(filters.players)) && (filters.thieves === "any" || r.thieves === Number(filters.thieves))
+    && (filters.region === "any" || (r.region || "Players") === filters.region) && (!q || r.name.toLowerCase().includes(q) || (r.region || "").toLowerCase().includes(q)));
 }
 function serverRows() {
   if (NET.ready && !practice) return onlineRows();
@@ -1292,7 +1481,7 @@ function serverRows() {
 function serversHTML() {
   const online = NET.ready && !practice;
   if (!online && (!SERVERS.length || serversMode !== DATA.mode)) makeServers();
-  const active = (filters.players !== "any") + (filters.thieves !== "any");
+  const active = (filters.players !== "any") + (filters.thieves !== "any") + (filters.region !== "any");
   return `<section class="sheet">
     <div class="sheet-head"><button class="back" data-go="menu" aria-label="Back">←</button><h2 class="display">${esc(M.title)} ${online ? "servers" : "practice"}</h2><button class="back" data-act="refresh" aria-label="Refresh servers">${ICONS.refresh}</button></div>
     ${menuMsg ? `<p class="small" style="margin:0;color:#ffc4c4">${esc(menuMsg)}</p>` : ""}
@@ -1303,15 +1492,17 @@ function serversHTML() {
     </div>
     <p class="sim-note">${online ? `Live servers. The count shows real players inside. Empty seats are filled by computer players when a round starts. <button class="linkish" data-act="practice" style="padding:0">Practice offline</button>`
       : `${NET.ready ? "Offline practice: everyone here is a computer player." : "You're offline, so this is practice with computer players."} ${NET.ready ? `<button class="linkish" data-act="online" style="padding:0">Back to online servers</button>` : ""}`} · <button class="linkish" data-go="modes" style="padding:0">Change mode</button></p>
+    ${online ? `<div><label for="srvSearch" class="sr">Search servers</label><input class="field" id="srvSearch" type="search" autocomplete="off" placeholder="Search by area or route, e.g. Yaba, Oshodi" value="${esc(srvQuery)}"></div>` : ""}
     <div class="server-list" id="serverList">${serverRows()}</div>
   </section>`;
 }
 function filterModal() {
   const row = (key, opts) => `<div class="chips-row" role="group">${opts.map((v) => `<button class="pick" aria-pressed="${String(filters[key]) === String(v)}" data-filter="${key}" data-v="${v}">${v === "any" ? "Any" : v}</button>`).join("")}</div>`;
   openModal(`<div class="modal-head"><h2 class="display" id="mtitle">Filter servers</h2><button class="x" data-act="close" aria-label="Close">✕</button></div>
-    <div><p class="label">Number of players</p>${row("players", ["any", 5, 6, 7, 8, 9, 10])}</div>
+    <div><p class="label">Number of players</p>${row("players", ["any", 5, 6, 7, 8, 9, 10, 12])}</div>
     <div><p class="label">Number of thieves</p>${row("thieves", ["any", 1, 2, 3])}</div>
-    <p class="small muted" style="margin:0" id="fcount">${plural(filteredServers().length, "server matches", "servers match")}.</p>
+    ${NET.ready && !practice ? `<div><p class="label">Area</p>${row("region", ["any", ...[...new Set(ONLINE_ROOMS.map((r) => r.region || "Players"))].sort()])}</div>` : ""}
+    <p class="small muted" style="margin:0" id="fcount">${plural(filterCount(), "server matches", "servers match")}.</p>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><button class="btn btn-ghost" data-act="clearfilters">Clear</button><button class="btn" data-act="applyfilters" data-focus>Show servers</button></div>`);
 }
 function privateHTML() {
@@ -1381,7 +1572,9 @@ function wardrobeModal() {
 function wardrobeHTML() {
   const tabs = [["outfit", "Outfit"], ["pattern", "Pattern"], ["colours", "Colours"], ["head", "Headwear"], ["hair", "Hair"], ["extras", "Extras"], ["pets", "Pets"], ["tag", "Name tag"], ["bag", "Exit bag"], ["skin", "Skin"]];
   return `<div class="dressing"><div class="mirror" id="mirror" aria-label="Your character preview"></div>
-      <div style="display:flex;flex-direction:column;gap:8px"><label class="label" for="nm" style="margin:0">Your name</label><input class="field" id="nm" maxlength="12" autocomplete="off" placeholder="Player" value="${esc(DATA.name)}"><button class="btn btn-ghost btn-sm" data-act="randomize">Surprise me</button></div></div>
+      <div style="display:flex;flex-direction:column;gap:8px">${isSignedIn() && ACCT.profile && ACCT.profile.username
+      ? `<p class="label" style="margin:0">Your username</p><strong style="font-size:18px">${esc(ACCT.profile.username)}</strong><span class="tiny muted">Change it in your account.</span>`
+      : `<label class="label" for="nm" style="margin:0">Your name</label><input class="field" id="nm" maxlength="12" autocomplete="off" placeholder="Player" value="${esc(DATA.name)}">`}<button class="btn btn-ghost btn-sm" data-act="randomize">Surprise me</button></div></div>
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button class="tab" role="tab" aria-selected="${custTab === k}" data-tab="${k}">${l}</button>`).join("")}</div>
     <div id="opts"></div>`;
 }
@@ -1431,6 +1624,53 @@ function fillFriends() {
   list.innerHTML = DATA.friends.map((f, i) => `<div class="friend"><span data-fpic="${i}"></span><div><strong>${esc(f.name)}</strong><div class="tiny muted">${f.invited ? "Joins your private rooms" : "Not invited"}</div></div>
     <label class="invite"><input type="checkbox" data-inv="${i}" ${f.invited ? "checked" : ""}>Invite</label><button class="xbtn" data-rmf="${i}" aria-label="Remove ${esc(f.name)}">✕</button></div>`).join("");
   list.querySelectorAll("[data-fpic]").forEach((el) => el.replaceWith(portrait(friendLook(DATA.friends[Number(el.dataset.fpic)]), 40, 50)));
+}
+
+// ---------- Account ----------
+function accountHTML() {
+  const title = ACCT.recovery ? "New password" : isSignedIn() ? "Your account" : ACCT.view === "login" ? "Log in" : "Sign up";
+  const head = `<div class="sheet-head"><button class="back" data-go="menu" aria-label="Back">←</button><h2 class="display">${title}</h2></div>`;
+  if (!NET.ready) return `<section class="sheet">${head}<p class="sim-note">Accounts need the internet. You're playing offline right now.</p></section>`;
+  const note = ACCT.err ? `<p class="small" role="alert" style="margin:0;color:#ffc4c4">${esc(ACCT.err)}</p>` : ACCT.msg ? `<p class="small" role="status" style="margin:0;color:var(--green)">${esc(ACCT.msg)}</p>` : "";
+  if (ACCT.recovery && isSignedIn()) return `<section class="sheet">${head}${note}
+    <form id="npForm" class="auth-form" autocomplete="on"><div><label class="label" for="npPass">New password</label><input class="field" id="npPass" type="password" minlength="8" autocomplete="new-password" required></div>
+    <button class="btn btn-block" type="submit">Save new password</button></form></section>`;
+  if (!isSignedIn()) {
+    const tabs = `<div class="seg" role="tablist"><button role="tab" aria-pressed="${ACCT.view !== "login"}" data-acctview="signup">Sign up</button><button role="tab" aria-pressed="${ACCT.view === "login"}" data-acctview="login">Log in</button></div>`;
+    const form = ACCT.view === "login"
+      ? `<form id="liForm" class="auth-form" autocomplete="on">
+          <div><label class="label" for="liEmail">Email</label><input class="field" id="liEmail" type="email" autocomplete="email" value="${esc(DATA.email)}" required></div>
+          <div><label class="label" for="liPass">Password</label><input class="field" id="liPass" type="password" autocomplete="current-password" required></div>
+          <button class="btn btn-block" type="submit">Log in</button>
+          <button class="linkish" type="button" data-act="forgot">Forgot password?</button></form>`
+      : `<form id="suForm" class="auth-form" autocomplete="on">
+          <div><label class="label" for="suName">Username</label><input class="field" id="suName" maxlength="15" autocomplete="username" autocapitalize="off" spellcheck="false" value="${esc(USER_RE.test(DATA.name) ? DATA.name : "")}" required><p class="tiny muted" id="suNameMsg" style="margin:4px 0 0">3 to 15 letters, numbers or _</p></div>
+          <div><label class="label" for="suEmail">Email</label><input class="field" id="suEmail" type="email" autocomplete="email" value="${esc(DATA.email)}" required></div>
+          <div><label class="label" for="suPass">Password</label><input class="field" id="suPass" type="password" minlength="8" autocomplete="new-password" required><p class="tiny muted" style="margin:4px 0 0">At least 8 characters.</p></div>
+          <button class="btn btn-block" type="submit">Create my account</button></form>`;
+    return `<section class="sheet">${head}
+      <p class="small muted" style="margin:0">An account keeps your username, outfit, stats and everything you buy, on any phone or laptop.</p>
+      ${tabs}${note}${form}
+      <p class="tiny muted" style="margin:0">You can still play as a guest. Guests keep their stuff on this device only.</p></section>`;
+  }
+  const pr = ACCT.profile || {};
+  if (!pr.username) return `<section class="sheet">${head}${note}
+    <p class="small" style="margin:0">Pick the username everybody will see in the game.</p>
+    <form id="unForm" class="auth-form" autocomplete="off"><div><label class="label" for="unName">Username</label><input class="field" id="unName" maxlength="15" autocapitalize="off" spellcheck="false" required><p class="tiny muted" id="unNameMsg" style="margin:4px 0 0">3 to 15 letters, numbers or _</p></div>
+    <button class="btn btn-block" type="submit">Save username</button></form>
+    <button class="btn btn-ghost btn-block" data-act="signout">Log out</button></section>`;
+  const owned = ITEMS.filter((it) => owns(it.id));
+  const since = pr.created_at ? new Date(pr.created_at).toLocaleDateString("en-NG", { month: "long", year: "numeric" }) : "";
+  return `<section class="sheet">${head}${note}
+    <div class="acct-top"><div id="acctPic" aria-hidden="true"></div><div style="min-width:0"><strong class="acct-name">${esc(pr.username)}</strong>${owns("vip") ? ` <span class="chip gold">VIP</span>` : ""}
+      <p class="tiny muted" style="margin:2px 0 0;overflow-wrap:anywhere">${esc(ACCT.user.email || "")}${since ? ` · joined ${esc(since)}` : ""}</p></div></div>
+    <div class="stats"><div><b>${pr.games_played || 0}</b><span>Online games</span></div><div><b>${pr.wins || 0}</b><span>Wins</span></div><div><b>${pr.thief_wins || 0}</b><span>Thief wins</span></div></div>
+    <div><p class="label">Your items</p>${owned.length ? `<div class="chips-row">${owned.map((it) => `<span class="chip">${esc(it.name)}</span>`).join("")}</div>` : `<p class="small muted" style="margin:0">Nothing yet. <button class="linkish" data-go="shop" style="padding:0">Visit the shop</button></p>`}</div>
+    <div class="divider"></div>
+    <form id="unForm" class="auth-form" autocomplete="off"><div><label class="label" for="unName">Change username</label><input class="field" id="unName" maxlength="15" autocapitalize="off" spellcheck="false" value="${esc(pr.username)}"><p class="tiny muted" id="unNameMsg" style="margin:4px 0 0">3 to 15 letters, numbers or _</p></div>
+    <button class="btn btn-ghost btn-block" type="submit">Save username</button></form>
+    <button class="btn btn-ghost btn-block" data-act="pwlink">Email me a link to change my password</button>
+    <button class="btn btn-ghost btn-block" data-act="signout">Log out</button></section>`;
 }
 
 // ---------- Settings ----------
@@ -1597,9 +1837,12 @@ function voiceTick(dt) {
   }
 }
 async function toggleMic() {
-  if (G.mic) { stopMic(); toast("Mic off."); lastActionsKey = ""; return; }
+  if (!me.alive) { toast("You're out of the round. Your mic stays off until the next one.", "bad"); return; }
+  if (G.mic) { stopMic(); rtcMute(); toast("Mic off."); lastActionsKey = ""; return; }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS); } catch (e) { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+    if (!G || !me.alive) { stream.getTracks().forEach((t) => t.stop()); return; }
     const ac = new (window.AudioContext || window.webkitAudioContext)(), an = ac.createAnalyser(); an.fftSize = 512;
     ac.createMediaStreamSource(stream).connect(an);
     if (!G) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -1613,7 +1856,7 @@ function stopMic() { const m = G && G.mic; if (!m) return; try { m.stream.getTra
 function micLevel() {
   const m = G.mic; if (!m) return;
   m.an.getByteTimeDomainData(m.buf); let sum = 0; for (const v of m.buf) { const x = (v - 128) / 128; sum += x * x; }
-  if (Math.sqrt(sum / m.buf.length) > 0.05) m.talkingAt = G.t;
+  if (Math.sqrt(sum / m.buf.length) > 0.05) { m.talkingAt = G.t; me.talkingAt = performance.now(); }
 }
 function bubble(c, x, y, msg) {
   c.font = "600 11px Rubik, sans-serif";
@@ -1661,7 +1904,6 @@ function netTick(dt) {
   G.posT -= dt;
   if (G.posT <= 0) { G.posT = 0.12; send("pos", { id: me.id, x: Math.round(me.x), y: Math.round(me.y), f: me.facing, m: me.moving ? 1 : 0, mi: G.mini, em: me.emote && me.emote.until > G.t ? [me.emote.id, +(me.emote.until - G.t).toFixed(1)] : null, fk: me.fakeT > 0 ? me.fakeSpot : null }); }
   if (NET.isHost) { G.snapT -= dt; if (G.snapT <= 0) { G.snapT = 0.16; send("st", snapshot()); } }
-  rtcVolumes();
 }
 function snapshot() {
   return {
@@ -1768,6 +2010,7 @@ function gameFrame(ts) {
   if (!gameRunning || !G) return;
   const dt = Math.min(0.05, (ts - last) / 1000 || 0); last = ts;
   if (G.mode === "play" && (!G.paused || NET.online)) tick(dt);
+  if (G && me) { silenceTheOut(); if (G.mic) micLevel(); rtcVolumes(); }
   if (G) { draw(ts); G.hudT -= dt; if (G.hudT <= 0) { G.hudT = 0.2; updateHud(); } }
   requestAnimationFrame(gameFrame);
 }
@@ -1805,7 +2048,7 @@ function draw(ts) {
     if (em) bubble(ctx, p.x, p.y - 76, em[2]);
     if (p === me && me.fakeT > 0) text(ctx, "pretending...", p.x, p.y + 16, "700 11px Rubik, sans-serif", "#ffb347");
     if (!em && p.isBot && p.sayUntil > G.t && S().voice) bubble(ctx, p.x, p.y - 76, p.sayText);
-    if (p === me && G.mic && G.mic.talkingAt > G.t - 0.4) { ctx.strokeStyle = "#2bd47d"; ctx.lineWidth = 2; for (const r2 of [8, 14]) { ctx.beginPath(); ctx.arc(p.x + 14, p.y - 40, r2, -0.6, 0.6); ctx.stroke(); } }
+    if (p.alive && ((p === me && G.mic && G.mic.talkingAt > G.t - 0.4) || (p !== me && p.talkingAt > performance.now() - 400))) { ctx.strokeStyle = "#2bd47d"; ctx.lineWidth = 2; for (const r2 of [8, 14]) { ctx.beginPath(); ctx.arc(p.x + 14, p.y - 40, r2, -0.6, 0.6); ctx.stroke(); } }
   }
   ctx.restore();
   if (dark) {
@@ -1944,6 +2187,7 @@ function updateHud() {
   const rd = ROLES[me.role];
   if (rd.ability && me.alive) acts.push(`<button class="btn btn-ghost" data-act="ability" ${abilityReady() ? "" : "disabled"}>${esc(rd.ability)}${rd.uses ? (me.abil.uses > 0 ? "" : " (used)") : me.abil.cd > 0 ? ` (${Math.ceil(me.abil.cd)})` : ""}</button>`);
   if (S().voice && me.alive) acts.push(`<button class="btn btn-ghost" data-act="mic" aria-pressed="${!!G.mic}">${G.mic ? "Mic on" : "Mic off"}</button>`);
+  else if (S().voice && NET.online) acts.push(`<button class="btn btn-ghost" disabled aria-label="Your mic is off because you're out of the round">Mic off · you're out</button>`);
   if (me.alive) acts.push(`<button class="btn btn-ghost" data-act="emote">Emote</button>`);
   const key = acts.join("");
   if (key !== lastActionsKey) { $("#actions").innerHTML = key; lastActionsKey = key; }
@@ -2204,7 +2448,7 @@ function addChatLine(p, msg, typed) {
   el.innerHTML = `<span class="dot" style="background:${p.look.c1}"></span><div><b>${esc(p === me ? "You" : p.name)}${typed ? ' <span class="tiny muted">typed</span>' : ""}</b><p>${esc(msg)}</p></div>`;
   chat.appendChild(el); chat.scrollTop = chat.scrollHeight;
 }
-function onChat(d) { if (!G || !G.meeting || !P[d.by]) return; const p = P[d.by]; if (!p.alive && me.alive) return; addChatLine(p, String(d.text).slice(0, 100), true); G.meeting.speaker = p.id; G.meeting.speakerUntil = performance.now() + 1600; sfx("tap"); }
+function onChat(d) { if (!G || !G.meeting || !P[d.by]) return; const p = P[d.by]; if (!p.alive) return; addChatLine(p, String(d.text).slice(0, 100), true); G.meeting.speaker = p.id; G.meeting.speakerUntil = performance.now() + 1600; sfx("tap"); }
 function meetTick() {
   const m = G && G.meeting; if (!m || G.mode !== "meeting") { if (G) clearInterval(G.meetIv); return; }
   const now = performance.now(), left = Math.max(0, m.secs - (now - m.start) / 1000);
@@ -2428,6 +2672,7 @@ function showEnd(d) {
   const { winner, how } = d;
   G.ended = true; G.paused = true; G.mode = "end"; G.mini = null; miniToken++; hush(); stopMic(); rtcClose(); stopRadio(); clearInterval(G.meetIv);
   const thieves = thiefList(), youWin = (winner === "thief") === me.isThief, word = crewWord();
+  if (NET.online && isSignedIn()) NET.sb.rpc("record_game", { p_won: youWin, p_thief: !!me.isThief }).then(() => loadProfile(), () => {});
   const reason = winner === "thief" ? `Only ${plural(crewAlive(), word === "passengers" ? "passenger has" : "housemate has", `${word} have`)} a phone left. The thieves run things now.`
     : how === "tasks" ? "Every chore is done and the thieves couldn't stop you." : "Every thief got caught and sent away with their bag.";
   retrack();
@@ -2452,6 +2697,7 @@ function showEnd(d) {
 // =====================================================================
 document.addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
+  unlockVoice();
   const d = b.dataset;
   if (d.go) { sfx("tap"); resetArmed = false; if (d.go === "private") priv.err = ""; go(d.go); return; }
   if (d.mode) { setMode(d.mode); sfx("tap"); renderMenu(); return; }
@@ -2462,19 +2708,23 @@ document.addEventListener("click", (e) => {
     const s = SERVERS.find((x) => x.id === d.join); if (s && s.players < s.max) { sfx("join"); enterPublic(s); } return;
   }
   if (d.buy) { buy(d.buy); return; }
+  if (d.acctview) { ACCT.view = d.acctview; ACCT.msg = ""; ACCT.err = ""; renderMenu(); return; }
   if (d.lockpick) { openShop(d.lockpick); return; }
   if (d.emote) { if (d.lock) { openShop(d.lock); return; } if (G) doEmote(d.emote); else if (LB) { const a = LB.actors.find((x) => x.m.you); if (a) a.emote = { id: d.emote, until: performance.now() + 3000 }; closeModal(); } return; }
-  if (d.filter) { filters[d.filter] = d.v; b.parentElement.querySelectorAll(".pick").forEach((x) => x.setAttribute("aria-pressed", x === b)); $("#fcount").textContent = plural(filteredServers().length, "server matches", "servers match") + "."; return; }
+  if (d.filter) { filters[d.filter] = d.v; b.parentElement.querySelectorAll(".pick").forEach((x) => x.setAttribute("aria-pressed", x === b)); srvPage = 1; $("#fcount").textContent = plural(filterCount(), "server matches", "servers match") + "."; return; }
   if (d.priv) { const pn = $("#pname"); if (pn) priv.name = pn.value; priv[d.priv] = Number(d.v); renderMenu(); return; }
   if (d.recent) { const r = DATA.rooms.find((x) => x.code === d.recent); if (r && r.online && NET.ready) joinOnlineByCode(r.code).then((err) => { if (err) { priv.err = err; renderMenu(); } }); else joinByCode(d.recent); return; }
   if (d.tab) { custTab = d.tab; document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", t.dataset.tab === custTab)); fillCustomize(); return; }
-  if (d.set) { if (d.lock) { openShop(d.lock); return; } DATA.look[d.set] = d.v; save(); sfx("tap"); fillCustomize(); syncMyLook(); return; }
+  if (d.set) { if (d.lock) { openShop(d.lock); return; } DATA.look[d.set] = d.v; save(); saveLookSoon(); sfx("tap"); fillCustomize(); syncMyLook(); return; }
   if (d.setting) { DATA.settings[d.setting] = d.v; save(); sfx("tap"); renderMenu(); return; }
   if (d.toggle) { DATA.settings[d.toggle] = !DATA.settings[d.toggle]; save(); sfx("tap"); renderMenu(); return; }
   if (d.rmf) { DATA.friends.splice(Number(d.rmf), 1); save(); fillFriends(); return; }
   if (d.pick) { const m = G && G.meeting; if (m && m.phase === "vote" && me.alive && m.cast[me.id] === undefined) { m.pick = Number(d.pick); sfx("tap"); renderVotePanel(); } return; }
   switch (d.act) {
     case "how": howModal(); break;
+    case "forgot": doForgot(); break;
+    case "signout": doSignout(); break;
+    case "pwlink": NET.sb.auth.resetPasswordForEmail(ACCT.user.email, { redirectTo: location.origin + "/" }).then(({ error }) => acctSay(error ? niceAuthError(error) : `We sent a link to ${ACCT.user.email}. Open it on this device to set a new password.`, !!error)); break;
     case "close": closeModal(); break;
     case "refresh": if (NET.ready) fetchRooms(); else { makeServers(); $("#serverList").innerHTML = serverRows(); } sfx("tap"); break;
     case "practice": practice = true; makeServers(); renderMenu(); break;
@@ -2493,7 +2743,8 @@ document.addEventListener("click", (e) => {
     }
     case "filter": filterModal(); break;
     case "applyfilters": closeModal(); renderMenu(); break;
-    case "clearfilters": filters.players = "any"; filters.thieves = "any"; closeModal(); renderMenu(); break;
+    case "clearfilters": filters.players = "any"; filters.thieves = "any"; filters.region = "any"; srvQuery = ""; srvPage = 1; closeModal(); renderMenu(); break;
+    case "more": srvPage++; { const l = $("#serverList"); if (l) l.innerHTML = serverRows(); } break;
     case "create": {
       const pn = $("#pname"); const name = ((pn && pn.value) || "").replace(/[<>]/g, "").trim().slice(0, 24) || `${displayName()}'s room`; sfx("done");
       const cfg = { name, max: priv.max, thieves: Math.min(priv.thieves, maxThieves(priv.max)), meetSecs: priv.meet };
@@ -2513,7 +2764,7 @@ document.addEventListener("click", (e) => {
     case "restore": loadPurchases().then(() => { shopMsg = "Your items are up to date."; tidyLook(); renderMenu(); }); break;
     case "wardrobe": if (nearMirror()) wardrobeModal(); break;
     case "closewardrobe": closeModal(); syncMyLook(); break;
-    case "randomize": DATA.look = randomLook(); save(); sfx("done"); fillCustomize(); syncMyLook(); break;
+    case "randomize": DATA.look = randomLook(); save(); saveLookSoon(); sfx("done"); fillCustomize(); syncMyLook(); break;
     case "reset":
       if (!resetArmed) { resetArmed = true; renderMenu(); break; }
       resetArmed = false; try { [KEY, "who-be-thief-v1", "who-be-ole-v2"].forEach((k) => localStorage.removeItem(k)); } catch (err) { /* ignore */ }
@@ -2544,9 +2795,17 @@ document.addEventListener("change", (e) => { if (e.target.dataset.inv != null) {
 document.addEventListener("input", (e) => {
   if (e.target.id === "nm") { DATA.name = e.target.value.replace(/[<>]/g, "").slice(0, 12); save(); syncMyLook(); }
   if (e.target.id === "pname") priv.name = e.target.value;
+  if (e.target.id === "suName" || e.target.id === "unName") checkUsername(e.target.id);
+  if (e.target.id === "srvSearch") { srvQuery = e.target.value; srvPage = 1; const l = $("#serverList"); if (l) l.innerHTML = serverRows(); }
 });
+const AUTH_FORMS = { suForm: () => doSignup(), liForm: () => doLogin(), unForm: () => doSetUsername(), npForm: () => doNewPassword() };
 document.addEventListener("submit", (e) => {
   e.preventDefault();
+  if (AUTH_FORMS[e.target.id]) {
+    const btn = e.target.querySelector('button[type="submit"]'), label = btn.textContent; btn.disabled = true; btn.textContent = "Please wait...";
+    AUTH_FORMS[e.target.id]().catch((err) => acctSay(niceAuthError(err), true)).finally(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = label; } });
+    return;
+  }
   if (e.target.id === "codeForm") {
     const v = $("#codeIn").value;
     if (NET.ready && !practice) { $("#codeErr").textContent = "Looking for the room..."; joinOnlineByCode(v).then((err) => { if (err) { priv.err = err; const el = $("#codeErr"); if (el) el.textContent = err; } else sfx("join"); }); return; }
@@ -2582,6 +2841,7 @@ renderMenu();
   setInterval(() => loadAds().catch(() => {}), 5 * 60 * 1000);
   const code = new URLSearchParams(location.search).get("room");
   if (code) { history.replaceState(null, "", location.pathname); const err = await joinOnlineByCode(code); if (err) { screen = "servers"; toastMenu(err); } return; }
-  if (screen === "menu" || screen === "servers" || screen === "shop") renderMenu();
+  if (["menu", "servers", "shop", "account"].includes(screen)) renderMenu();
 })();
+document.addEventListener("pointerdown", unlockVoice, { passive: true });
 })();
