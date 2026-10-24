@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Advertise on Naija Sus</title>
+<meta name="description" content="Put your brand, business or song inside Naija Sus: billboards, danfo wraps, danfo radio and round sponsorships from ₦10,000 a week.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bungee&family=Rubik:wght@400;500;700;800&display=swap">
+<link rel="stylesheet" href="/src/styles.css">
+<style>
+  .ad-wrap { max-width: 680px; margin: 0 auto; padding: max(20px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 40px max(16px, env(safe-area-inset-left, 0px)); display: flex; flex-direction: column; gap: 18px; }
+  .ad-hero h1 { font-size: clamp(32px, 9vw, 52px); color: var(--lantern); }
+  .ad-hero p { margin: 8px 0 0; font-size: 17px; }
+  .packs { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+  .pack { text-align: left; display: flex; flex-direction: column; gap: 6px; padding: 14px; border-radius: 14px; border: 2px solid var(--line); background: var(--surface-2); }
+  .pack[aria-pressed="true"] { border-color: var(--lantern); background: #3a2f1f; }
+  .pack strong { font-size: 16px; }
+  .pack .price { font-family: var(--font-display); font-size: 20px; color: var(--lantern); }
+  .pack span { font-size: 13.5px; color: var(--muted); }
+  form { display: flex; flex-direction: column; gap: 14px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 480px) { .two { grid-template-columns: 1fr; } }
+  label.label { display: block; }
+  .help { font-size: 12.5px; color: var(--muted); margin: 4px 0 0; }
+  .msg { margin: 0; font-weight: 700; }
+  .msg.bad { color: #ffc4c4; } .msg.good { color: var(--green); }
+  .steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+  a.back-link { color: var(--muted); }
+</style>
+</head>
+<body>
+<main class="ad-wrap">
+  <p><a class="back-link" href="/">← Back to the game</a></p>
+  <header class="ad-hero">
+    <p class="eyebrow">Advertise inside the game</p>
+    <h1 class="display">Put your brand in Naija Sus</h1>
+    <p>Players walk past your billboard, ride in your wrapped danfo, and hear your song on the danfo radio. Every package runs for 7 days.</p>
+  </header>
+
+  <section class="sheet" aria-labelledby="h-packs">
+    <h2 class="display" id="h-packs" style="font-size:22px">1. Choose a package</h2>
+    <div class="packs" id="packs"></div>
+  </section>
+
+  <section class="sheet" aria-labelledby="h-details">
+    <h2 class="display" id="h-details" style="font-size:22px">2. Tell us about your ad</h2>
+    <form id="adForm" novalidate>
+      <div><p class="label">What are you promoting?</p>
+        <div class="chips-row" id="kinds">
+          <button type="button" class="pick" data-kind="product" aria-pressed="true">A product</button>
+          <button type="button" class="pick" data-kind="business" aria-pressed="false">A business</button>
+          <button type="button" class="pick" data-kind="music" aria-pressed="false">A song</button>
+        </div></div>
+      <div class="two">
+        <div><label class="label" for="brand">Brand, business or artist name</label><input class="field" id="brand" maxlength="60" required></div>
+        <div><label class="label" for="headline">Ad line (shown in the game)</label><input class="field" id="headline" maxlength="60" required placeholder="e.g. Cold zobo, delivered in 30 mins"></div>
+      </div>
+      <div class="two">
+        <div><label class="label" for="email">Email</label><input class="field" id="email" type="email" autocomplete="email" required></div>
+        <div><label class="label" for="phone">Phone (optional)</label><input class="field" id="phone" type="tel" autocomplete="tel" maxlength="30"></div>
+      </div>
+      <div><label class="label" for="link">Link (optional)</label><input class="field" id="link" type="url" placeholder="https://..."><p class="help">Your website, Instagram, or where people can stream your song.</p></div>
+      <div id="imageField"><label class="label" for="image">Logo or ad image</label><input class="field" id="image" type="file" accept="image/png,image/jpeg,image/webp"><p class="help">PNG, JPG or WebP, up to 2 MB. A wide image works best on billboards and danfo wraps.</p></div>
+      <div id="audioField" hidden>
+        <div class="two">
+          <div><label class="label" for="artist">Artist</label><input class="field" id="artist" maxlength="60"></div>
+          <div><label class="label" for="song">Song or jingle title</label><input class="field" id="song" maxlength="80"></div>
+        </div>
+        <label class="label" for="audio" style="margin-top:10px">MP3 file</label><input class="field" id="audio" type="file" accept="audio/mpeg"><p class="help">MP3 up to 8 MB. Only upload music you own or have the rights to.</p>
+      </div>
+      <div><label class="label" for="start">Start date</label><input class="field" id="start" type="date"></div>
+      <p class="msg" id="msg" role="status"></p>
+      <button class="btn btn-block" type="submit" id="submitBtn">Continue to payment</button>
+    </form>
+  </section>
+
+  <section class="sheet" aria-labelledby="h-next">
+    <h2 class="display" id="h-next" style="font-size:22px">What happens next</h2>
+    <ol class="steps">
+      <li>You pay securely with Paystack (card, bank transfer or USSD).</li>
+      <li>We check your ad within 24 hours to keep the game family friendly.</li>
+      <li>Your ad goes live on your start date and runs for 7 days. We email you when it's live.</li>
+    </ol>
+    <p class="small muted" style="margin:0">No adult content, gambling, betting, loans, political campaigns or anything that copies another brand. We refund ads we can't approve.</p>
+  </section>
+</main>
+<script type="module" src="/src/advertise.js"></script>
+</body>
+</html>
