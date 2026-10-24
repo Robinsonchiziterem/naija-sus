@@ -2725,7 +2725,7 @@ document.addEventListener("click", (e) => {
   if (d.pick) { const m = G && G.meeting; if (m && m.phase === "vote" && me.alive && m.cast[me.id] === undefined) { m.pick = Number(d.pick); sfx("tap"); renderVotePanel(); } return; }
   switch (d.act) {
     case "how": howModal(); break;
-    case "music": DATA.settings.music = !DATA.settings.music; save(); musicUnlocked = true; menuMusicTick(); renderMenu(); break;
+    case "music": DATA.settings.music = !DATA.settings.music; save(); musicGesture(); menuMusicTick(); renderMenu(); break;
     case "forgot": doForgot(); break;
     case "signout": doSignout(); break;
     case "pwlink": NET.sb.auth.resetPasswordForEmail(ACCT.user.email, { redirectTo: location.origin + "/" }).then(({ error }) => acctSay(error ? niceAuthError(error) : `We sent a link to ${ACCT.user.email}. Open it on this device to set a new password.`, !!error)); break;
@@ -2834,7 +2834,7 @@ document.addEventListener("keydown", (e) => {
   if (G && G.mini) { G.mini = null; miniToken++; closeModal(); }
   else if (!G) { closeModal(); syncMyLook(); }
 });
-window.__sus = { get G() { return G; }, get P() { return P; }, get ROOM() { return ROOM; }, get LB() { return LB; }, get M() { return M; }, get music() { return JAZZ.playing; } };
+window.__sus = { get G() { return G; }, get P() { return P; }, get ROOM() { return ROOM; }, get LB() { return LB; }, get M() { return M; }, get music() { return JAZZ.playing && !!RTC.ac && RTC.ac.state === "running"; } };
 
 renderMenu();
 (async () => {
@@ -2850,19 +2850,60 @@ renderMenu();
 document.addEventListener("pointerdown", unlockVoice, { passive: true });
 
 // ---------- Menu music ----------
-// Browsers only allow sound after the first tap or key press, so the jazz starts then.
+// Phones only allow sound after a real tap (touchend or click, not just touching
+// the screen), so every tap re-checks and wakes the audio up if it's asleep.
+// iPhones also mute this kind of sound when the silent switch is on, unless a
+// normal audio element is playing too, so we play a silent one alongside.
 const JAZZ = createJazz();
-let musicUnlocked = false;
+let musicUnlocked = true, silentEl = null, musicHint = null;
+function silentAudio() {
+  if (silentEl) return silentEl;
+  const sr = 8000, n = sr / 2, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf), w = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, n * 2, true);
+  silentEl = new Audio(URL.createObjectURL(new Blob([buf], { type: "audio/wav" }))); silentEl.loop = true; silentEl.playsInline = true; silentEl.setAttribute("playsinline", "");
+  return silentEl;
+}
+function setSession(type) { try { if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type; } catch (e) { /* not supported */ } }
+function musicWanted() { return S().music && musicUnlocked && !G && screen !== "room" && !document.hidden; }
 function menuMusicTick() {
-  const want = S().music && musicUnlocked && !G && screen !== "room" && !document.hidden;
+  const want = musicWanted();
   try {
-    if (want && !JAZZ.playing) JAZZ.start(audioCtx(), 0.32);
-    else if (!want && JAZZ.playing) JAZZ.stop(G || screen === "room" ? 0.6 : 0.3);
+    if (want) {
+      setSession("playback");
+      const ac = audioCtx();
+      if (!JAZZ.playing) JAZZ.start(ac, 0.6);
+      if (silentEl && silentEl.paused) silentEl.play().catch(() => {});
+    } else if (JAZZ.playing) {
+      JAZZ.stop(G || screen === "room" ? 0.6 : 0.3);
+      if (silentEl) silentEl.pause();
+      setSession("auto");
+    }
   } catch (e) { /* no audio on this device */ }
 }
-const unlockMusic = () => { if (musicUnlocked) return; musicUnlocked = true; menuMusicTick(); };
-document.addEventListener("pointerdown", unlockMusic, { passive: true });
-document.addEventListener("keydown", unlockMusic);
+// A small note at the bottom while the browser is still holding the sound back.
+function updateMusicHint() {
+  const blocked = musicWanted() && (!RTC.ac || RTC.ac.state !== "running");
+  if (blocked && !musicHint) {
+    musicHint = document.createElement("button"); musicHint.className = "music-hint"; musicHint.type = "button";
+    musicHint.innerHTML = '<span aria-hidden="true">♪</span> Tap anywhere for music';
+    document.body.appendChild(musicHint);
+  }
+  if (musicHint) musicHint.hidden = !blocked;
+}
+function musicGesture() {
+  musicUnlocked = true;
+  if (!musicWanted()) { updateMusicHint(); return; }
+  silentAudio().play().catch(() => {});
+  if (RTC.ac && RTC.ac.state !== "running") RTC.ac.resume().catch(() => {});
+  menuMusicTick();
+  setTimeout(updateMusicHint, 150);
+}
+for (const ev of ["touchend", "click", "keydown", "pointerup", "mousedown"]) document.addEventListener(ev, musicGesture, { passive: true, capture: true });
 document.addEventListener("visibilitychange", menuMusicTick);
-setInterval(menuMusicTick, 300);
+setInterval(() => { menuMusicTick(); updateMusicHint(); }, 300);
+// Try to start straight away. Some browsers allow it (for example Chrome on a
+// computer for sites you use a lot); the rest start on the first tap.
+menuMusicTick();
+try { const ac = audioCtx(); ac.addEventListener("statechange", updateMusicHint); } catch (e) { /* no audio */ }
 })();
