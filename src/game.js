@@ -2855,7 +2855,7 @@ document.addEventListener("pointerdown", unlockVoice, { passive: true });
 // iPhones also mute this kind of sound when the silent switch is on, unless a
 // normal audio element is playing too, so we play a silent one alongside.
 const JAZZ = createJazz();
-let musicUnlocked = true, silentEl = null, musicHint = null;
+let musicUnlocked = true, silentEl = null, musicHint = null, tappedOnce = false;
 function silentAudio() {
   if (silentEl) return silentEl;
   const sr = 8000, n = sr / 2, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf), w = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
@@ -2882,17 +2882,19 @@ function menuMusicTick() {
   } catch (e) { /* no audio on this device */ }
 }
 // A small note at the bottom while the browser is still holding the sound back.
+// Shown when the game opens, until the player's first tap (phones keep sound off until then).
 function updateMusicHint() {
-  const blocked = musicWanted() && (!RTC.ac || RTC.ac.state !== "running");
-  if (blocked && !musicHint) {
+  const show = musicWanted() && (!tappedOnce || !RTC.ac || RTC.ac.state !== "running");
+  if (show && !musicHint) {
     musicHint = document.createElement("button"); musicHint.className = "music-hint"; musicHint.type = "button";
-    musicHint.innerHTML = '<span aria-hidden="true">♪</span> Tap anywhere for music';
+    musicHint.setAttribute("aria-label", "Tap your screen to hear the music");
+    musicHint.innerHTML = '<span class="mh-icon" aria-hidden="true">♪</span><span class="mh-text"><b>Tap your screen to hear the music</b><small>Your phone keeps game sound off until you touch the screen. One tap and the jazz starts.</small></span>';
     document.body.appendChild(musicHint);
   }
-  if (musicHint) musicHint.hidden = !blocked;
+  if (musicHint) musicHint.hidden = !show;
 }
 function musicGesture() {
-  musicUnlocked = true;
+  musicUnlocked = true; tappedOnce = true;
   if (!musicWanted()) { updateMusicHint(); return; }
   silentAudio().play().catch(() => {});
   if (RTC.ac && RTC.ac.state !== "running") RTC.ac.resume().catch(() => {});
