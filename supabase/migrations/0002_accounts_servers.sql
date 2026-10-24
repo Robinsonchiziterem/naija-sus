@@ -21,6 +21,7 @@ create or replace function private.username_ok(p text) returns boolean language 
   select p ~ '^[A-Za-z0-9_]{3,15}$'
      and lower(p) not in ('admin','administrator','naijasus','naija_sus','moderator','mod','support','host','you','system','thief','computer','official');
 $$;
+alter function private.username_ok(text) set search_path = '';
 
 -- A profile is made for every new account. The username chosen at sign up is used if it is free.
 create or replace function private.handle_new_user() returns trigger
